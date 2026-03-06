@@ -44,6 +44,8 @@
     const KEY_COORD_RECORDS = "FB_COORD_RECORDS"; // 新增：座標紀錄清單
     const KEY_TARGET_TIME = "FB_TARGET_TIME";     // 新增：目標啟動時間
     const KEY_REFRESH_RATE = "FB_REFRESH_RATE";   // 新增：重整頻率
+    const KEY_PANEL_LEFT = "FB_PANEL_LEFT";       // 新增：面板 X 座標
+    const KEY_PANEL_TOP = "FB_PANEL_TOP";         // 新增：面板 Y 座標
 
     let hasClickedCoord = false;
 
@@ -54,26 +56,37 @@
         const id = 'fb-control-panel-v21';
         if (document.getElementById(id)) return;
 
-        const panel = document.createElement('div');
-        panel.id = id;
-        panel.style.cssText = `
-            position: fixed; bottom: 20px; right: 20px; width: 300px;
-            background: rgba(33, 33, 33, 0.95); color: #fff;
-            z-index: 9999999; border-radius: 8px; font-family: 'Segoe UI', sans-serif;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #444;
-            font-size: 13px;
-        `;
-
         // 讀取當前數值
         const getVal = (k, def) => storage.getItem(k) || def;
         const isMon = storage.getItem(KEY_MONITOR_ON) === "true";
         const isRush = storage.getItem(KEY_RUSH_ON) === "true";
         const records = JSON.parse(getVal(KEY_COORD_RECORDS, "[]"));
 
+        const panel = document.createElement('div');
+        panel.id = id;
+        
+        // 設定初始位置 (若無紀錄則預設在右下角)
+        const savedLeft = storage.getItem(KEY_PANEL_LEFT);
+        const savedTop = storage.getItem(KEY_PANEL_TOP);
+        let posStyle = savedLeft && savedTop 
+            ? `left: ${savedLeft}px; top: ${savedTop}px;` 
+            : `right: 20px; bottom: 20px;`;
+
+        panel.style.cssText = `
+            position: fixed; ${posStyle} width: 300px;
+            background: rgba(33, 33, 33, 0.95); color: #fff;
+            z-index: 9999999; border-radius: 8px; font-family: 'Segoe UI', sans-serif;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #444;
+            font-size: 13px;
+        `;
+
         panel.innerHTML = `
-            <div style="padding: 10px; background: #0D47A1; border-radius: 8px 8px 0 0; font-weight: bold; display: flex; justify-content: space-between;">
-                <span>🤖 FB 搶票控制台 V21.3</span>
-                <span id="panel-status" style="color: ${isMon ? '#00E676' : (isRush ? '#FFEA00' : '#B0BEC5')}">●</span>
+            <div id="fb-panel-header" style="padding: 10px; background: #0D47A1; border-radius: 8px 8px 0 0; font-weight: bold; display: flex; justify-content: space-between; cursor: move; user-select: none;">
+                <span>🤖 FB 搶票控制台 V21.4</span>
+                <div>
+                    <span id="panel-status" style="color: ${isMon ? '#00E676' : (isRush ? '#FFEA00' : '#B0BEC5')}; margin-right: 5px;">●</span>
+                    <button id="btn-close-panel" style="background:none; border:none; color:white; font-weight:bold; cursor:pointer; font-size:14px; padding:0 5px;" title="關閉控制面板">✖</button>
+                </div>
             </div>
             <div style="padding: 15px;">
                 <div style="margin-bottom: 8px; display: flex; align-items: center;">
@@ -123,6 +136,58 @@
         `;
 
         document.body.appendChild(panel);
+
+        // --- 拖曳功能 ---
+        const header = document.getElementById('fb-panel-header');
+        let isDragging = false;
+        let startX, startY, initialLeft, initialTop;
+
+        header.addEventListener('mousedown', (e) => {
+            if (e.target.id === 'btn-close-panel') return; // 點擊關閉按鈕時不觸發拖曳
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            
+            // 取得目前的 left/top (若為 auto 則透過 getBoundingClientRect 轉換)
+            const rect = panel.getBoundingClientRect();
+            initialLeft = rect.left;
+            initialTop = rect.top;
+            
+            // 轉換為絕對定位以利拖曳
+            panel.style.bottom = 'auto';
+            panel.style.right = 'auto';
+            panel.style.left = initialLeft + 'px';
+            panel.style.top = initialTop + 'px';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            const newLeft = initialLeft + dx;
+            const newTop = initialTop + dy;
+            
+            panel.style.left = newLeft + 'px';
+            panel.style.top = newTop + 'px';
+            
+            // 儲存最新座標
+            storage.setItem(KEY_PANEL_LEFT, newLeft);
+            storage.setItem(KEY_PANEL_TOP, newTop);
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+        });
+
+        // --- 關閉面板功能 ---
+        document.getElementById('btn-close-panel').addEventListener('click', () => {
+            // 停止所有搶票與監控行為
+            storage.setItem(KEY_MONITOR_ON, "false");
+            storage.setItem(KEY_RUSH_ON, "false");
+            document.getElementById('fb-scope')?.remove();
+            panel.remove();
+            showStatus("🛑 搶票腳本已手動關閉。如需再次使用請重新整理網頁。", "#D32F2F");
+        });
 
         // 事件綁定
         const inputs = ['inp-time', 'inp-refresh', 'inp-keyword', 'inp-filter', 'inp-text', 'inp-x', 'inp-y'];
@@ -180,14 +245,44 @@
         };
 
         // 座標擷取
-        document.getElementById('btn-capture').onclick = function() {
-            const originalText = this.innerText;
-            this.innerText = "⏳ 請在頁面上點擊目標...";
-            this.style.background = "#00838F";
-            document.body.style.cursor = "crosshair";
-            showStatus("📍 擷取模式已啟動，請點擊目標位置", "#00ACC1");
+        let isCapturing = false;
+        let captureClickHandler = null;
+        let captureKeyHandler = null;
 
-            const onPageClick = (e) => {
+        document.getElementById('btn-capture').onclick = function() {
+            const btn = this;
+            const originalText = "📍 擷取";
+
+            // 如果已經在擷取狀態，則取消
+            if (isCapturing) {
+                cancelCapture();
+                return;
+            }
+
+            // 啟動擷取狀態
+            isCapturing = true;
+            btn.innerText = "✖ 取消";
+            btn.style.background = "#D32F2F";
+            document.body.style.cursor = "crosshair";
+            showStatus("📍 擷取模式已啟動，請點擊目標位置 (按 ESC 取消)", "#00ACC1");
+
+            function cancelCapture() {
+                isCapturing = false;
+                btn.innerText = originalText;
+                btn.style.background = "#00838F";
+                document.body.style.cursor = "default";
+                document.removeEventListener('click', captureClickHandler, true);
+                document.removeEventListener('keydown', captureKeyHandler, true);
+                showStatus("🛑 已取消座標擷取", "#757575");
+            }
+
+            captureKeyHandler = (e) => {
+                if (e.key === 'Escape') {
+                    cancelCapture();
+                }
+            };
+
+            captureClickHandler = (e) => {
                 // 排除點擊到面板本身
                 if (panel.contains(e.target)) return;
 
@@ -203,19 +298,23 @@
                 document.getElementById('inp-x').value = x;
                 document.getElementById('inp-y').value = y;
 
-                this.innerText = originalText;
-                this.style.background = "#455A64";
+                // 恢復原狀
+                isCapturing = false;
+                btn.innerText = originalText;
+                btn.style.background = "#00838F";
                 document.body.style.cursor = "default";
+                document.removeEventListener('click', captureClickHandler, true);
+                document.removeEventListener('keydown', captureKeyHandler, true);
 
                 // 重繪準心
                 document.getElementById('fb-scope')?.remove();
                 drawScope(x, y);
 
                 showStatus(`✅ 已記錄座標: (${x}, ${y})`, "#43A047");
-                document.removeEventListener('click', onPageClick, true);
             };
 
-            document.addEventListener('click', onPageClick, true);
+            document.addEventListener('click', captureClickHandler, true);
+            document.addEventListener('keydown', captureKeyHandler, true);
         };
 
         // 監控開關
@@ -271,10 +370,25 @@
         if(!s) {
             s = document.createElement('div');
             s.id = 'fb-scope';
-            s.style.cssText = `position:fixed; left:${x-15}px; top:${y-15}px; width:30px; height:30px; border:2px solid #00FF00; border-radius:50%; z-index:9999999; pointer-events:none; box-shadow:0 0 10px #00FF00; background:rgba(0,255,0,0.1);`;
+            s.style.cssText = `position:fixed; left:${x-15}px; top:${y-15}px; width:30px; height:30px; border:2px solid #00FF00; border-radius:50%; z-index:9999999; pointer-events:none; box-shadow:0 0 10px #00FF00; background:rgba(0,255,0,0.1); transition: opacity 0.5s;`;
             s.innerHTML = `<div style="position:absolute;top:14px;left:0;width:30px;height:2px;background:#00FF00;"></div><div style="position:absolute;left:14px;top:0;height:30px;width:2px;background:#00FF00;"></div>`;
             document.body.appendChild(s);
+        } else {
+            s.style.left = `${x-15}px`;
+            s.style.top = `${y-15}px`;
+            s.style.opacity = '1';
         }
+
+        // 清除舊的計時器
+        if (window.scopeTimeout) clearTimeout(window.scopeTimeout);
+        
+        // 3秒後自動淡出並移除
+        window.scopeTimeout = setTimeout(() => {
+            if (s) {
+                s.style.opacity = '0';
+                setTimeout(() => s.remove(), 500);
+            }
+        }, 2000);
     }
 
     function fuzzyFindAlbum(keyword, filter) {
