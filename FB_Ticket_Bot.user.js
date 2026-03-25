@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name         排球輕鬆玩-自動留言機器人 (V21.2 視覺版)
+// @name         排球輕鬆玩-自動留言機器人
 // @namespace    http://tampermonkey.net/
-// @version      21.2
 // @description  專為排球輕鬆玩設計，全自動 OCR 辨識相簿並搶留言
 // @author       Gemini
 // @match        *://*.facebook.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @connect      *
 // @require      https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js
 // ==/UserScript==
@@ -33,7 +34,13 @@
     const RUSH_POLLING_RATE = 100;
     // =================================================
 
-    const storage = localStorage;
+    // 改用 GM 儲存機制
+    const storage = {
+        getItem: (k) => GM_getValue(k),
+        setItem: (k, v) => GM_setValue(k, v),
+        removeItem: (k) => GM_deleteValue(k)
+    };
+    
     const KEY_MONITOR_ON = "FB_MONITOR_ACTIVE";
     const KEY_RUSH_ON = "FB_RUSH_ACTIVE";
     const KEY_TARGET_NAME = "FB_TARGET_NAME";
@@ -78,7 +85,12 @@
         const id = 'fb-control-panel-v21';
         if (document.getElementById(id)) return;
 
-        const getVal = (k, def) => storage.getItem(k) || def;
+        // 修正後的 getVal：如果 storage 沒有值才用預設值，且支援空字串
+        const getVal = (k, def) => {
+            const v = storage.getItem(k);
+            return (v === undefined || v === null) ? def : v;
+        };
+
         const isMon = storage.getItem(KEY_MONITOR_ON) === "true";
         const isRush = storage.getItem(KEY_RUSH_ON) === "true";
 
@@ -111,7 +123,7 @@
                 <div id="ocr-settings" style="padding: 10px; background: rgba(0,188,212,0.1); border-radius: 4px; border: 1px dashed #00BCD4; margin-bottom: 8px;">
                     <div style="display: flex; align-items: center; margin-bottom: 5px;">
                         <label style="flex:1; color:#00BCD4;">辨識日期關鍵字:</label>
-                        <input type="text" id="inp-ocr-date" value="${DEFAULT_OCR_DATE}" style="width: 140px; padding: 4px; background: #333; border: 1px solid #00BCD4; color: white; border-radius: 4px;">
+                        <input type="text" id="inp-ocr-date" value="${getVal(KEY_OCR_DATE, DEFAULT_OCR_DATE)}" style="width: 140px; padding: 4px; background: #333; border: 1px solid #00BCD4; color: white; border-radius: 4px;">
                     </div>
                     <div style="display: flex; align-items: center;">
                         <label style="flex:1; color:#00BCD4;">辨識時段關鍵字:</label>
@@ -125,7 +137,7 @@
                 </div>
                 <div style="margin-bottom: 8px; display: flex; align-items: center;">
                     <label style="flex:1;">相簿尋找關鍵字:</label>
-                    <input type="text" id="inp-keyword" value="${DEFAULT_KEYWORD}" style="width: 160px; padding: 4px; background: #424242; border: 1px solid #616161; color: white; border-radius: 4px;">
+                    <input type="text" id="inp-keyword" value="${getVal(KEY_TARGET_NAME, DEFAULT_KEYWORD)}" style="width: 160px; padding: 4px; background: #424242; border: 1px solid #616161; color: white; border-radius: 4px;">
                 </div>
                 <div style="margin-bottom: 8px; display: flex; align-items: center;">
                     <label style="flex:1;">相簿地點濾鏡:</label>
@@ -327,72 +339,127 @@
         target.dispatchEvent(new KeyboardEvent('keyup', k));
     }
 
+    function formatTimeLeft(ms) {
+        if (ms <= 0) return "00:00:00";
+        const seconds = Math.floor((ms / 1000) % 60);
+        const minutes = Math.floor((ms / (1000 * 60)) % 60);
+        const hours = Math.floor((ms / (1000 * 60 * 60)));
+        
+        const h = String(hours).padStart(2, '0');
+        const m = String(minutes).padStart(2, '0');
+        const s = String(seconds).padStart(2, '0');
+        
+        return `${h}:${m}:${s}`;
+    }
+
+    // 播放提示音 (啟動前預警)
+    function playBeep(freq = 880, duration = 150) {
+        try {
+            const context = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = context.createOscillator();
+            const gain = context.createGain();
+            oscillator.connect(gain);
+            gain.connect(context.destination);
+            oscillator.type = 'sine';
+            oscillator.frequency.value = freq;
+            oscillator.start();
+            setTimeout(() => oscillator.stop(), duration);
+        } catch (e) {}
+    }
+
     // ==========================================
-    // Main Loop
+    // Main Loop (優化為穩定循環)
     // ==========================================
-    setInterval(() => {
-        const url = window.location.href;
+    function mainLoop() {
         const isMonitorMode = storage.getItem(KEY_MONITOR_ON) === "true";
         const isRushMode = storage.getItem(KEY_RUSH_ON) === "true";
 
+        // 如果完全沒開啟任何模式，清除狀態並結束本次循環
+        if (!isMonitorMode && !isRushMode) {
+            const d = document.getElementById('fb-status-v20');
+            if (d) d.remove();
+            setTimeout(mainLoop, 1000);
+            return;
+        }
+
+        const url = window.location.href;
         const targetName = storage.getItem(KEY_TARGET_NAME) || DEFAULT_KEYWORD;
         const targetFilter = storage.getItem(KEY_TARGET_FILTER) || DEFAULT_FILTER;
         const signUpText = storage.getItem(KEY_SIGN_TEXT) || DEFAULT_SIGN_UP_TEXT;
         const ocrDateKeyword = storage.getItem(KEY_OCR_DATE) || DEFAULT_OCR_DATE;
         const ocrTimeKeyword = storage.getItem(KEY_OCR_TIME) || DEFAULT_OCR_TIME;
 
-        // 1. 監控模式
-        if (isMonitorMode && url.includes("/media")) {
+        // 1. 監控模式 (修正：只要開啟監控就顯示時間，不論網址)
+        if (isMonitorMode) {
             const targetTimeStr = storage.getItem(KEY_TARGET_TIME);
             const now = new Date();
 
             if (targetTimeStr) {
                 const [tH, tM] = targetTimeStr.split(':').map(Number);
-                // 每次循環都重新構建當前的目標時間點
-                const targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), tH, tM, 0, 0);
+                let targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), tH, tM, 0, 0);
                 
-                // 核心邏輯：如果現在時間還沒到設定時間
+                if (now > targetDate && (now - targetDate) > 10000) { 
+                    targetDate = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
+                }
+                
                 if (now < targetDate) {
                     const diffMs = targetDate - now;
-                    const diffSec = Math.ceil(diffMs / 1000);
-                    showStatus(`⏳ 監控中... 剩餘 ${diffSec} 秒 [目標 ${targetTimeStr}]`, "#FF9800");
+                    
+                    // --- 音效提醒邏輯 (最後 10 秒) ---
+                    const diffSec = Math.floor(diffMs / 1000);
+                    if (diffSec <= 10 && diffSec > 0 && !window._lastBeepSec !== diffSec) {
+                        playBeep(880 + (10 - diffSec) * 50); // 秒數越近聲音越高
+                        window._lastBeepSec = diffSec;
+                    }
+
+                    let pageWarning = url.includes("/media") ? "" : " (⚠️ 請前往相簿頁面)";
+                    let tabWarning = document.hidden ? " (🚨 分頁休眠中，請點回此分頁！)" : "";
+                    
+                    showStatus(`⏳ 監控中... 剩餘 ${formatTimeLeft(diffMs)}${pageWarning}${tabWarning}`, (url.includes("/media") && !document.hidden) ? "#FF9800" : "#D32F2F");
+                    
+                    // 如果分頁被隱藏，縮短檢查時間嘗試喚醒，但這無法保證繞過瀏覽器限制
+                    setTimeout(mainLoop, document.hidden ? 200 : 500); 
                     return; 
                 }
             }
 
-            // --- 時間已到，執行搜尋邏輯 ---
-            showStatus(`🔍 時間已到 (${targetTimeStr})！正在搜尋目標...`, "#0D47A1");
+            // 時間到了，但如果不在正確頁面，提示使用者
+            if (!url.includes("/media")) {
+                showStatus(`⚠️ 時間已到！但您不在相簿頁面，請手動前往！`, "#D32F2F");
+                setTimeout(mainLoop, 1000);
+                return;
+            }
+
+            // --- 時間已到且在正確頁面，執行搜尋邏輯 ---
+            showStatus(`🔍 時間已到！正在搜尋標籤為 [${targetName}] 的相簿...`, "#0D47A1");
             const targetEl = fuzzyFindAlbum(targetName, targetFilter);
             
             if (targetEl) {
-                targetEl.style.border = "5px solid blue";
-                targetEl.style.boxShadow = "0 0 15px blue";
                 const validUrl = extractValidUrl(targetEl);
-
                 if (validUrl) {
                     showStatus(`✅ 鎖定目標！跳轉中...`, "blue");
                     storage.setItem(KEY_MONITOR_ON, "false");
                     storage.setItem(KEY_RUSH_ON, "true");
                     window.location.href = validUrl;
                 } else {
-                    showStatus(`⚠️ 找到目標但無連結，嘗試模擬點擊`, "orange");
                     storage.setItem(KEY_MONITOR_ON, "false");
                     storage.setItem(KEY_RUSH_ON, "true");
                     targetEl.click();
                 }
             } else {
-                // 如果時間到了但沒找到目標，則定期重新整理
                 if (!window._lastReloadTime || (Date.now() - window._lastReloadTime > MONITOR_REFRESH_RATE)) {
                     window._lastReloadTime = Date.now();
-                    showStatus(`🔍 未發現目標，重新整理中...`, "#555");
+                    showStatus(`🔍 尚未發現相簿 [${targetName}]，重新整理中...`, "#555");
                     window.location.reload();
                 }
             }
+            setTimeout(mainLoop, RUSH_POLLING_RATE);
             return;
         }
 
         // 2. 搶票模式
         if (isRushMode) {
+            // ... (其餘邏輯保持不變)
             const photoDialog = document.querySelector('div[role="dialog"]');
             const isViewingPhoto = (photoDialog && photoDialog.offsetParent !== null) && (url.includes("photo") || url.includes("fbid="));
             const isInAlbum = (url.includes("/set/") || url.includes("set=")) && !isViewingPhoto;
@@ -547,5 +614,10 @@
                 })();
             }
         }
-    }, RUSH_POLLING_RATE);
+        
+        setTimeout(mainLoop, RUSH_POLLING_RATE);
+    }
+
+    // 啟動主循環
+    mainLoop();
 })();
