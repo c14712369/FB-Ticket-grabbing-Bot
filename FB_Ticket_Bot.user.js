@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         FB 搶票機器人 (V21.1 視覺辨識版)
+// @name         排球輕鬆玩-自動留言機器人 (V21.2 視覺版)
 // @namespace    http://tampermonkey.net/
-// @version      21.1
-// @description  基於 V21.0，新增 Tesseract.js 視覺影像辨識功能，可自動尋找圖片上的特定文字並點擊
+// @version      21.2
+// @description  專為排球輕鬆玩設計，全自動 OCR 辨識相簿並搶留言
 // @author       Gemini
 // @match        *://*.facebook.com/*
 // @grant        GM_xmlhttpRequest
@@ -101,7 +101,7 @@
 
         panel.innerHTML = `
             <div id="fb-panel-header" style="padding: 10px; background: #0D47A1; border-radius: 8px 8px 0 0; font-weight: bold; display: flex; justify-content: space-between; cursor: move; user-select: none;">
-                <span>🤖 FB 搶票控制台 V21.2 視覺版</span>
+                <span>🤖 排球輕鬆玩-自動留言機器人</span>
                 <div>
                     <span id="panel-status" style="color: ${isMon ? '#00E676' : (isRush ? '#FFEA00' : '#B0BEC5')}; margin-right: 5px;">●</span>
                     <button id="btn-close-panel" style="background:none; border:none; color:white; font-weight:bold; cursor:pointer; font-size:14px; padding:0 5px;" title="關閉控制面板">✖</button>
