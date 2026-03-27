@@ -7,6 +7,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @connect      *
 // @require      https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js
 // ==/UserScript==
@@ -56,6 +57,7 @@
     const KEY_OCR_TIME = "FB_OCR_TIME";           // OCR 辨識的時段關鍵字
 
     let isActionTriggered = false;
+    let isWaitingForDialog = false;
 
     // Helper: Fetch Image Bypassing CORS
     function fetchImageBlob(url) {
@@ -148,9 +150,12 @@
                     <input type="text" id="inp-text" value="${getVal(KEY_SIGN_TEXT, DEFAULT_SIGN_UP_TEXT)}" style="width: 160px; padding: 4px; background: #424242; border: 1px solid #616161; color: white; border-radius: 4px;">
                 </div>
 
-                <div style="display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 10px; margin-top: 15px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; margin-top: 15px;">
                     <button id="btn-monitor" style="padding: 8px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; background: ${isMon ? '#D32F2F' : '#2E7D32'}; color: white;">
                         ${isMon ? '⏹ 停止監控' : '▶ 啟動監控'}
+                    </button>
+                    <button id="btn-immediate" style="padding: 8px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; background: #E65100; color: white;">
+                        ⚡ 立刻執行
                     </button>
                 </div>
                 <div style="margin-top:10px; font-size:10px; color:#888; text-align:center;">設定變更即時生效</div>
@@ -227,6 +232,29 @@
                 window._processedOcrImages = new Set();
                 showStatus("🛰️ 監控啟動中...", "#0D47A1");
             }
+        };
+
+        document.getElementById('btn-immediate').onclick = function() {
+            // 清除啟動時間，直接進監控模式讓它立刻搜尋相簿
+            storage.setItem(KEY_TARGET_TIME, "");
+            document.getElementById('inp-time').value = "";
+
+            storage.setItem(KEY_MONITOR_ON, "true");
+            storage.setItem(KEY_RUSH_ON, "false");
+
+            // 重設內部監控狀態
+            window._lastReloadTime = 0;
+            window._isOcrRunning = false;
+            window._processedOcrImages = new Set();
+            isWaitingForDialog = false;
+
+            const btnMonitor = document.getElementById('btn-monitor');
+            if (btnMonitor) {
+                btnMonitor.innerText = "⏹ 停止監控";
+                btnMonitor.style.background = "#D32F2F";
+            }
+            updateStatusLight();
+            showStatus("⚡ 立刻執行！正在搜尋相簿...", "#E65100");
         };
 
         function updateStatusLight() {
@@ -328,11 +356,26 @@
     function fastInput(target, text) {
         target.focus();
         target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        // 先用 beforeinput（Lexical 優先監聽這個）
+        target.dispatchEvent(new InputEvent('beforeinput', {
+            inputType: 'insertText', data: text, bubbles: true, cancelable: true
+        }));
         document.execCommand('insertText', false, text);
-        target.dispatchEvent(new InputEvent('textInput', { data: text, bubbles: true }));
+        target.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: text, bubbles: true }));
     }
 
-    function fastEnter(target) {
+    function fastEnter(target, searchRoot) {
+        // 優先嘗試點擊送出按鈕
+        const root = searchRoot || document;
+        const submitBtn = root.querySelector(
+            '[aria-label="留言"], [aria-label="Comment"], [aria-label="Send"], ' +
+            'div[aria-label="留言"] ~ div button, form button[type="submit"]'
+        );
+        if (submitBtn && submitBtn.offsetParent !== null) {
+            submitBtn.click();
+            return;
+        }
+        // 備用：Enter 鍵
         const k = {bubbles:true, cancelable:true, keyCode:13, which:13, key:'Enter', code:'Enter'};
         target.dispatchEvent(new KeyboardEvent('keydown', k));
         target.dispatchEvent(new KeyboardEvent('keypress', k));
@@ -461,7 +504,9 @@
         if (isRushMode) {
             // ... (其餘邏輯保持不變)
             const photoDialog = document.querySelector('div[role="dialog"]');
-            const isViewingPhoto = (photoDialog && photoDialog.offsetParent !== null) && (url.includes("photo") || url.includes("fbid="));
+            // 照片頁偵測：有 dialog 或 URL 直接帶 photo/fbid 參數
+            const isOnPhotoUrl = url.includes("fbid=") || url.includes("/photo/") || url.includes("photo_id=");
+            const isViewingPhoto = !!(photoDialog && photoDialog.offsetParent !== null) || isOnPhotoUrl;
             const isInAlbum = (url.includes("/set/") || url.includes("set=")) && !isViewingPhoto;
 
             if (!isInAlbum && !isViewingPhoto) {
@@ -469,21 +514,36 @@
                 return;
             }
 
+            // 正在等待 dialog 出現
+            if (isWaitingForDialog) {
+                if (isViewingPhoto) {
+                    isWaitingForDialog = false; // dialog 出現了，繼續往下執行
+                } else {
+                    showStatus("⏳ 等待照片 dialog 開啟...", "teal");
+                    setTimeout(mainLoop, RUSH_POLLING_RATE);
+                    return;
+                }
+            }
+
             if (isViewingPhoto) {
-                const inputs = photoDialog.querySelectorAll('div[role="textbox"][data-lexical-editor="true"], div[contenteditable="true"][role="textbox"]');
+                // dialog 模式從 dialog 找，直接導向照片頁則從整個頁面找
+                const searchRoot = (photoDialog && photoDialog.offsetParent !== null) ? photoDialog : document;
+                const inputs = searchRoot.querySelectorAll('div[role="textbox"][data-lexical-editor="true"], div[contenteditable="true"][role="textbox"]');
                 if (inputs.length > 0) {
                     const target = inputs[inputs.length - 1];
                     if (target.offsetParent !== null && !target.innerText.includes(signUpText.split(' ')[0])) {
                         showStatus("✍️ 寫入留言...", "blue");
                         fastInput(target, signUpText);
                         setTimeout(() => {
-                            if (target.innerText.length > 0) {
-                                fastEnter(target);
+                            if (target.innerText.trim().length > 0) {
+                                fastEnter(target, searchRoot);
                                 showStatus("✅ 完成！", "#388E3C");
-                                storage.removeItem(KEY_RUSH_ON);
-                                storage.removeItem(KEY_MONITOR_ON);
+                                storage.setItem(KEY_RUSH_ON, "false");
+                                storage.setItem(KEY_MONITOR_ON, "false");
+                            } else {
+                                showStatus("⚠️ 文字未填入，重試中...", "#FF9800");
                             }
-                        }, 100);
+                        }, 200);
                         return;
                     }
                 } else {
@@ -491,8 +551,6 @@
                 }
             } 
             else if (isInAlbum) {
-                if (isActionTriggered) return; 
-
                 // --- 影像文字辨識 (OCR) ---
                 if (window._isOcrRunning) return; 
                 
@@ -525,16 +583,19 @@
                 }
 
                 if (targetElement) {
-                    showStatus(`⚡ 快速辨識：標籤找到 ${ocrDateKeyword} 圖片！點擊中...`, "green");
-                    targetElement.click(); 
-                    let parentA = targetElement.closest('a');
-                    if(parentA) parentA.click();
-                    
-                    if (clickElementCenter(targetElement)) {
-                        isActionTriggered = true;
-                        setTimeout(() => { isActionTriggered = false; }, 3000);
+                    showStatus(`⚡ 快速辨識：標籤找到 ${ocrDateKeyword} 圖片！跳轉中...`, "green");
+                    const parentA = targetElement.closest('a');
+                    if (parentA && parentA.href) {
+                        // 直接導航到照片頁，繞過 lightbox 合成事件問題
+                        window._isOcrRunning = false;
+                        window.location.href = parentA.href;
+                        return;
                     }
+                    // 備用：沒有 href 才嘗試點擊
+                    targetElement.click();
+                    isWaitingForDialog = true;
                     window._isOcrRunning = false;
+                    setTimeout(mainLoop, RUSH_POLLING_RATE);
                     return;
                 }
 
@@ -591,10 +652,13 @@
                                 const matchTime = ocrTimeKeyword === "" || text.includes(ocrTimeKeyword.replace(/\s/g, ''));
 
                                 if (matchDate && matchTime) {
-                                    showStatus(`✅ OCR 辨識成功！${ocrDateKeyword}`, "green");
-                                    if (clickElementCenter(img)) {
-                                        isActionTriggered = true;
-                                        setTimeout(() => { isActionTriggered = false; }, 3000);
+                                    showStatus(`✅ OCR 辨識成功！${ocrDateKeyword}，跳轉中...`, "green");
+                                    const parentA = img.closest('a');
+                                    if (parentA && parentA.href) {
+                                        window.location.href = parentA.href;
+                                    } else {
+                                        clickElementCenter(img);
+                                        isWaitingForDialog = true;
                                     }
                                     found = true;
                                     break;
